@@ -86,9 +86,9 @@ if __name__ == "__main__":
         
         phi  = ni.eval_ao(m, grid.coords)
         phi *= (grid.weights ** 0.5)[:, None]
-        xao, chol = chole_decomp(phi, tol=1e-8) # How to setup the tolerance?
+        xao, chol = chole_decomp(phi, tol=1e-10) # How to setup the tolerance?
         nisp, nao = xao.shape
-        rho = build_rho(xao, tol=1e-8)
+        rho = build_rho(xao, tol=1e-10)
         
         df = pyscf.df.DF(m)
         df.max_memory = 400
