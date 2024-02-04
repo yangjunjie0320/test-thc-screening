@@ -19,7 +19,9 @@ def WaterCluster(n=64, basis="ccpvdz", verbose=4):
 
     return mol
 
-def chole_decomp(phi, tol=1e-8, tol2=1e-4):
+def chole_decomp(phi, tol=1e-8):
+    tol = numpy.min([tol ** 2, tol, 1e-6])
+
     ngrid, nao = phi.shape
     rho = dok_array((ngrid, nao * (nao + 1) // 2))
     mask = numpy.where(numpy.abs(phi) > numpy.sqrt(tol))
@@ -36,7 +38,7 @@ def chole_decomp(phi, tol=1e-8, tol2=1e-4):
     ss += ss.T
 
     from scipy.linalg.lapack import dpstrf
-    chol, pind, rank, info = dpstrf(ss.todense(), tol=tol*tol2)
+    chol, pind, rank, info = dpstrf(ss.todense(), tol=tol)
     assert info == 1  # Make sure pivoting Cholesky runs in success
     nispt = rank
 
@@ -88,34 +90,32 @@ if __name__ == "__main__":
         phi *= (grid.weights ** 0.5)[:, None]
 
         for tol in [1e-4, 1e-6, 1e-8, 1e-10, 1e-12]:
-            for tol2 in [1e-1, 1e-2, 1e-3, 1e-4]:
-                xao, chol = chole_decomp(phi, tol=tol, tol2=tol2) # How to setup the tolerance?
-                nisp, nao = xao.shape
-                rho = build_rho(xao, tol=tol)
-                
-                df = pyscf.df.DF(m)
-                df.max_memory = 400
-                df.auxbasis = "weigend"
-                df.build()
-                naux = df.get_naoaux()
+            xao, chol = chole_decomp(phi, tol=tol) # How to setup the tolerance?
+            nisp, nao = xao.shape
+            rho = build_rho(xao, tol=tol)
+            
+            df = pyscf.df.DF(m)
+            df.max_memory = 400
+            df.auxbasis = "weigend"
+            df.build()
+            naux = df.get_naoaux()
 
-                coul = numpy.zeros((naux, nisp))
-                blksize = 10 # max(4, int(min(df.blockdim, max_memory * 3e5 / 8 / nao**2)))
+            coul = numpy.zeros((naux, nisp))
+            blksize = 10 # max(4, int(min(df.blockdim, max_memory * 3e5 / 8 / nao**2)))
 
-                p1 = 0
-                chol_eri = numpy.zeros((naux, nao, nao))
-                for istep, chol_l in enumerate(df.loop(blksize=blksize)):
-                    p0, p1 = p1, p1 + chol_l.shape[0]
-                    coul[p0:p1] = rho.dot(chol_l.T).T * 2
-                    chol_eri[p0:p1] = pyscf.lib.unpack_tril(chol_l, axis=1)
+            p1 = 0
+            chol_eri = numpy.zeros((naux, nao, nao))
+            for istep, chol_l in enumerate(df.loop(blksize=blksize)):
+                p0, p1 = p1, p1 + chol_l.shape[0]
+                coul[p0:p1] = rho.dot(chol_l.T).T * 2
+                chol_eri[p0:p1] = pyscf.lib.unpack_tril(chol_l, axis=1)
 
-                # print(chol.shape, jg.shape)
-                import sys
-                ww = scipy.linalg.solve_triangular(chol.T, coul.T, lower=True).T
-                vv = scipy.linalg.solve_triangular(chol, ww.T, lower=False).T
-                chol_eri_ = numpy.einsum("QI,Iu,Iv->Quv", vv, xao, xao)
+            import sys
+            ww = scipy.linalg.solve_triangular(chol.T, coul.T, lower=True).T
+            vv = scipy.linalg.solve_triangular(chol, ww.T, lower=False).T
+            chol_eri_ = numpy.einsum("QI,Iu,Iv->Quv", vv, xao, xao)
 
-                err = numpy.max(numpy.abs(chol_eri - chol_eri_))
-                
-                print("tol = %6.4e, tol2 = %6.4e, err = %6.4e" % (tol, tol2, err))
-                # print("naux = %d, nisp = %d, nao = %d" % (naux, nisp, nao))
+            err = numpy.max(numpy.abs(chol_eri - chol_eri_))
+            
+            print("tol = %6.4e, tol2 = %6.4e, err = %6.4e" % (tol, tol2, err))
+            # print("naux = %d, nisp = %d, nao = %d" % (naux, nisp, nao))
