@@ -20,7 +20,9 @@ def WaterCluster(n=64, basis="ccpvdz", verbose=4):
     return mol
 
 def chole_decomp(phi, tol=1e-8):
-    tol = numpy.min([tol ** 2, tol, 1e-6])
+    tol = min(tol, tol ** 2, 1e-6)
+    if tol < 1e-12:
+        tol = 1e-12
 
     ngrid, nao = phi.shape
     rho = dok_array((ngrid, nao * (nao + 1) // 2))
@@ -38,21 +40,23 @@ def chole_decomp(phi, tol=1e-8):
     ss += ss.T
 
     from scipy.linalg.lapack import dpstrf
-    chol, pind, rank, info = dpstrf(ss.todense(), tol=tol)
+    chol, perm, rank, info = dpstrf(ss.todense(), tol=tol)
     assert info == 1  # Make sure pivoting Cholesky runs in success
+
     nispt = rank
+    perm = (numpy.array(perm) - 1)[:nispt]
 
-    chol[numpy.tril_indices(ngrid, k=-1)] = 0
-    perm = numpy.zeros((ngrid, ngrid))
-    perm[pind-1, numpy.arange(ngrid)] = 1
-
+    tril = numpy.tril_indices(nispt, k=-1)
     chol = chol[:nispt, :nispt]
-    perm = perm[:, :nispt]
-    
-    xx = numpy.dot(perm.T, phi)
-    return xx, chol
+    chol[tril] *= 0.0
+    visp = phi[perm]
+    return chol, visp
 
 def build_rho(phi=None, tol=1e-8):
+    tol = min(tol, tol ** 2, 1e-6)
+    if tol < 1e-12:
+        tol = 1e-12
+
     ng, nao = phi.shape
     rho = dok_array((ng, nao * (nao + 1) // 2))
 
@@ -71,6 +75,7 @@ def build_rho(phi=None, tol=1e-8):
     return rho
 
 if __name__ == "__main__":
+    tol = 1e-4
     for n in [2]:
         m = WaterCluster(n=n, basis="631g*", verbose=0)
         m.max_memory = 400
@@ -81,41 +86,33 @@ if __name__ == "__main__":
         grid = Grids(m)
         grid.atom_grid = {"O": (19, 50), "H": (11, 50)}
         grid.prune = None
+        # grid.level = 1
         grid.build()
 
         from pyscf.lib.logger import perf_counter, process_clock
         log = pyscf.lib.logger.Logger(verbose=5)
         
         phi  = ni.eval_ao(m, grid.coords)
-        phi *= (grid.weights ** 0.5)[:, None]
+        phi *= (numpy.abs(grid.weights) ** 0.5)[:, None]
+        chol, visp = chole_decomp(phi, tol=tol) # How to setup the tolerance?
+        nisp, nao = visp.shape
+        rho = build_rho(visp, tol=tol)
+        
+        df = pyscf.df.DF(m)
+        df.max_memory = 400
+        df.auxbasis = "weigend"
+        df.build()
+        naux = df.get_naoaux()
 
-        for tol in [1e-4, 1e-6, 1e-8, 1e-10, 1e-12]:
-            xao, chol = chole_decomp(phi, tol=tol) # How to setup the tolerance?
-            nisp, nao = xao.shape
-            rho = build_rho(xao, tol=tol)
-            
-            df = pyscf.df.DF(m)
-            df.max_memory = 400
-            df.auxbasis = "weigend"
-            df.build()
-            naux = df.get_naoaux()
+        coul = numpy.zeros((naux, nisp))
 
-            coul = numpy.zeros((naux, nisp))
-            blksize = 10 # max(4, int(min(df.blockdim, max_memory * 3e5 / 8 / nao**2)))
+        p1 = 0
+        blksize = 10
+        
+        for istep, chol_l in enumerate(df.loop(blksize=blksize)):
+            p0, p1 = p1, p1 + chol_l.shape[0]
+            coul[p0:p1] = rho.dot(chol_l.T).T * 2.0
 
-            p1 = 0
-            chol_eri = numpy.zeros((naux, nao, nao))
-            for istep, chol_l in enumerate(df.loop(blksize=blksize)):
-                p0, p1 = p1, p1 + chol_l.shape[0]
-                coul[p0:p1] = rho.dot(chol_l.T).T * 2
-                chol_eri[p0:p1] = pyscf.lib.unpack_tril(chol_l, axis=1)
+        ww = scipy.linalg.solve_triangular(chol.T, coul.T, lower=True).T
+        vv = scipy.linalg.solve_triangular(chol, ww.T, lower=False).T
 
-            import sys
-            ww = scipy.linalg.solve_triangular(chol.T, coul.T, lower=True).T
-            vv = scipy.linalg.solve_triangular(chol, ww.T, lower=False).T
-            chol_eri_ = numpy.einsum("QI,Iu,Iv->Quv", vv, xao, xao)
-
-            err = numpy.max(numpy.abs(chol_eri - chol_eri_))
-            
-            print("tol = %6.4e, tol2 = %6.4e, err = %6.4e" % (tol, tol2, err))
-            # print("naux = %d, nisp = %d, nao = %d" % (naux, nisp, nao))
